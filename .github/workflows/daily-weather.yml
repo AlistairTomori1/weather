@@ -24,44 +24,57 @@ jobs:
       - name: Fetch weather & append CSV
         env:
           WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
-          CITY: "Harare"
-          COUNTRY_CODE: "ZW"
+          LAT: "-17.8292"      # Harare approx
+          LON: "31.0522"
         run: |
           set -euo pipefail
           mkdir -p data
           OUTFILE="data/weather.csv"
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          API_URL="https://api.openweathermap.org/data/2.5/weather?q=${CITY},${COUNTRY_CODE}&units=metric&appid=${WEATHER_API_KEY}"
+          API_URL="https://api.openweathermap.org/data/2.5/weather?lat=${LAT}&lon=${LON}&units=metric&appid=${WEATHER_API_KEY}"
 
-          # Request JSON
-          RESPONSE=$(curl -sS "${API_URL}")
+          # Fetch and capture HTTP status separately
+          HTTP_CODE=$(curl -sS -w "%{http_code}" -o /tmp/resp.json "$API_URL")
 
-          # Quick check
-          if echo "$RESPONSE" | jq -e '.cod // 200' >/dev/null 2>&1; then
-            :
-          else
-            echo "Weather API returned error:"
-            echo "$RESPONSE"
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "HTTP error: $HTTP_CODE"
+            echo "Body:"
+            cat /tmp/resp.json || true
             exit 1
           fi
 
-          # parse fields (change/add fields as you like)
-          TEMP=$(echo "$RESPONSE" | jq -r '.main.temp // empty')
-          WEATHER_DESC=$(echo "$RESPONSE" | jq -r '.weather[0].description // empty')
-          HUMIDITY=$(echo "$RESPONSE" | jq -r '.main.humidity // empty')
-          WIND=$(echo "$RESPONSE" | jq -r '.wind.speed // empty')
-
-          # If file missing, add header
-          if [ ! -f "$OUTFILE" ]; then
-            echo "timestamp_iso,city,country,temp_c,weather,humidity,wind_m_s,raw_json_url" > "$OUTFILE"
+          # Some responses return cod as number or string; normalize
+          COD=$(jq -r '.cod | tostring // "200"' /tmp/resp.json)
+          if [ "$COD" != "200" ]; then
+            echo "OpenWeather error cod=$COD message=$(jq -r '.message // "unknown error"' /tmp/resp.json)"
+            exit 1
           fi
 
-          # Append CSV row (escape commas in description)
-          SAFE_WEATHER=$(echo "$WEATHER_DESC" | sed 's/,/;/g')
-          RAW_URL="data:application/json;$(echo "$RESPONSE" | jq -c '.')"
-          echo "${TIMESTAMP},${CITY},${COUNTRY_CODE},${TEMP},\"${SAFE_WEATHER}\",${HUMIDITY},${WIND},${API_URL}" >> "$OUTFILE"
+          TEMP=$(jq -r '.main.temp // empty' /tmp/resp.json)
+          WEATHER_DESC=$(jq -r '.weather[0].description // empty' /tmp/resp.json)
+          HUMIDITY=$(jq -r '.main.humidity // empty' /tmp/resp.json)
+          WIND=$(jq -r '.wind.speed // empty' /tmp/resp.json)
 
+          # Sanity check to avoid writing empty rows
+          if [ -z "${TEMP}" ] || [ -z "${WEATHER_DESC}" ]; then
+            echo "Parsed fields missing; response was:"
+            cat /tmp/resp.json
+            exit 1
+          fi
+
+          # Header if file missing
+          if [ ! -f "$OUTFILE" ]; then
+            echo "timestamp_iso,city,country,temp_c,weather,humidity,wind_m_s,raw_json_source" > "$OUTFILE"
+          fi
+
+          SAFE_WEATHER=$(printf "%s" "$WEATHER_DESC" | sed 's/,/;/g')
+          CITY=$(jq -r '.name // "Harare"' /tmp/resp.json)
+          COUNTRY=$(jq -r '.sys.country // "ZW"' /tmp/resp.json)
+
+          # Do NOT store the API key in the CSV; just note source type
+          echo "${TIMESTAMP},${CITY},${COUNTRY},${TEMP},\"${SAFE_WEATHER}\",${HUMIDITY},${WIND},openweathermap_current" >> "$OUTFILE"
+      
       - name: Commit and push changes
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
