@@ -4,3 +4,4 @@ timestamp_iso,city,country,temp_c,weather,humidity,wind_m_s,raw_json_url
 2025-10-30T03:28:13Z,Harare,ZW,17.12,"broken clouds",72,2.79,openweathermap_current
 2025-10-30T04:39:37Z,Harare,ZW,21.14,"broken clouds",51,2.72,openweathermap_current
 2025-10-30T05:36:33Z,Harare,ZW,22.68,"broken clouds",53,3,openweathermap_current
+2025-10-30T06:46:48Z,Harare,ZW,26.58,"few clouds",32,3.47,openweathermap_current
