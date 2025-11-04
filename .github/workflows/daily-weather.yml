@@ -1,16 +1,125 @@
-name: Daily Weather Logger
+name: Daily Weather Logger (randomized N times/day)
 
 on:
+  # Tick every 30 minutes. We'll decide inside whether this slot should run.
   schedule:
-    # runs daily at 00:05 UTC (adjust as you like)
-    - cron: "23 * * * *"
+    - cron: "*/30 * * * *"   # GitHub cron is UTC
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
+# Prevent overlapping runs if a tick is still executing
+concurrency:
+  group: weather-randomized
+  cancel-in-progress: true
+
+env:
+  # Day boundary used for randomness and slot math
+  LOCAL_TZ: America/Toronto
+  MIN_RUNS: "5"
+  MAX_RUNS: "22"
+  SLOT_MINUTES: "30"   # change to 20 or 60 if you prefer
+
 jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.plan.outputs.should_run }}
+      n:          ${{ steps.plan.outputs.n }}
+      slots:      ${{ steps.plan.outputs.slots }}
+      slot_index: ${{ steps.plan.outputs.slot_index }}
+      now:        ${{ steps.plan.outputs.now }}
+    steps:
+      - name: Pick today’s plan and check this slot
+        id: plan
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tz = process.env.LOCAL_TZ || 'UTC';
+            const slotMinutes = parseInt(process.env.SLOT_MINUTES || '30', 10);
+            const minRuns = parseInt(process.env.MIN_RUNS || '5', 10);
+            const maxRuns = parseInt(process.env.MAX_RUNS || '22', 10);
+
+            // Local YYYY-MM-DD for stable per-day randomness
+            const now = new Date();
+            const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+            const parts = Object.fromEntries(fmt.formatToParts(now).map(p => [p.type, p.value]));
+            const ymd = `${parts.year}-${parts.month}-${parts.day}`;
+
+            // Simple seeded PRNG from the date
+            function cyrb53(str, seed=0){
+              let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+              for (let i=0; i<str.length; i++) {
+                const ch = str.charCodeAt(i);
+                h1 = Math.imul(h1 ^ ch, 2654435761);
+                h2 = Math.imul(h2 ^ ch, 1597334677);
+              }
+              h1 = (h1 ^ (h1>>>16)) >>> 0;
+              h2 = (h2 ^ (h2>>>16)) >>> 0;
+              return (h2<<32) ^ h1;
+            }
+            function mulberry32(a){
+              return function(){
+                let t = a += 0x6D2B79F5;
+                t = Math.imul(t ^ (t >>> 15), t | 1);
+                t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+              }
+            }
+            const seed = cyrb53(ymd) & 0xffffffff;
+            const rng = mulberry32(seed);
+
+            const slotsPerDay = Math.floor(1440 / slotMinutes);
+
+            const n = Math.max(minRuns,
+                        Math.min(maxRuns,
+                                 Math.floor(rng() * (maxRuns - minRuns + 1)) + minRuns));
+
+            // Spread N targets roughly evenly with jitter; resolve collisions
+            const stride = 1440 / n;
+            const chosenSet = new Set();
+            for (let k = 0; k < n; k++) {
+              const baseMin = Math.floor(k * stride);
+              const jitterRange = Math.max(1, Math.floor(stride / 3));
+              const jitter = Math.floor((rng() - 0.5) * 2 * jitterRange);
+              const cand = Math.max(0, Math.min(1439, baseMin + jitter));
+              let slot = Math.floor(cand / slotMinutes);
+              if (chosenSet.has(slot)) {
+                let up = slot, down = slot;
+                for (let step = 1; step < slotsPerDay; step++) {
+                  up = (slot + step) % slotsPerDay;
+                  if (!chosenSet.has(up)) { slot = up; break; }
+                  down = (slot - step + slotsPerDay) % slotsPerDay;
+                  if (!chosenSet.has(down)) { slot = down; break; }
+                }
+              }
+              chosenSet.add(slot);
+            }
+            const chosen = Array.from(chosenSet).sort((a,b)=>a-b);
+
+            // Compute current local slot index
+            const nowLocal = new Date(now.toLocaleString('en-US', { timeZone: tz }));
+            const mins = nowLocal.getHours()*60 + nowLocal.getMinutes();
+            const slotIdx = Math.floor(mins / slotMinutes);
+
+            core.setOutput('should_run', String(chosen.includes(slotIdx)));
+            core.setOutput('n', String(n));
+            core.setOutput('slots', JSON.stringify(chosen));
+            core.setOutput('slot_index', String(slotIdx));
+            core.setOutput('now', nowLocal.toISOString());
+
+      - name: Log plan for debugging
+        run: |
+          echo "Local time:  ${{ steps.plan.outputs.now }}"
+          echo "Runs today:  ${{ steps.plan.outputs.n }}"
+          echo "Slots:       ${{ steps.plan.outputs.slots }}"
+          echo "This slot:   ${{ steps.plan.outputs.slot_index }}"
+          echo "Should run:  ${{ steps.plan.outputs.should_run }}"
+
   log-weather:
+    needs: decide
+    if: needs.decide.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -34,17 +143,14 @@ jobs:
 
           API_URL="https://api.openweathermap.org/data/2.5/weather?lat=${LAT}&lon=${LON}&units=metric&appid=${WEATHER_API_KEY}"
 
-          # Fetch and capture HTTP status separately
           HTTP_CODE=$(curl -sS -w "%{http_code}" -o /tmp/resp.json "$API_URL")
 
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "HTTP error: $HTTP_CODE"
-            echo "Body:"
-            cat /tmp/resp.json || true
+            echo "Body:"; cat /tmp/resp.json || true
             exit 1
           fi
 
-          # Some responses return cod as number or string; normalize
           COD=$(jq -r '.cod | tostring // "200"' /tmp/resp.json)
           if [ "$COD" != "200" ]; then
             echo "OpenWeather error cod=$COD message=$(jq -r '.message // "unknown error"' /tmp/resp.json)"
@@ -56,14 +162,11 @@ jobs:
           HUMIDITY=$(jq -r '.main.humidity // empty' /tmp/resp.json)
           WIND=$(jq -r '.wind.speed // empty' /tmp/resp.json)
 
-          # Sanity check to avoid writing empty rows
           if [ -z "${TEMP}" ] || [ -z "${WEATHER_DESC}" ]; then
-            echo "Parsed fields missing; response was:"
-            cat /tmp/resp.json
+            echo "Parsed fields missing; response was:"; cat /tmp/resp.json
             exit 1
           fi
 
-          # Header if file missing
           if [ ! -f "$OUTFILE" ]; then
             echo "timestamp_iso,city,country,temp_c,weather,humidity,wind_m_s,raw_json_source" > "$OUTFILE"
           fi
@@ -72,9 +175,8 @@ jobs:
           CITY=$(jq -r '.name // "Harare"' /tmp/resp.json)
           COUNTRY=$(jq -r '.sys.country // "ZW"' /tmp/resp.json)
 
-          # Do NOT store the API key in the CSV; just note source type
           echo "${TIMESTAMP},${CITY},${COUNTRY},${TEMP},\"${SAFE_WEATHER}\",${HUMIDITY},${WIND},openweathermap_current" >> "$OUTFILE"
-      
+
       - name: Commit and push changes
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -84,14 +186,10 @@ jobs:
           set -euo pipefail
           git config user.name "${AUTHOR_NAME}"
           git config user.email "${AUTHOR_EMAIL}"
-
-          # Only commit if there are changes
           if git status --porcelain | grep -q .; then
             git add data/weather.csv
-            git commit -m "chore(weather): append weather for $(date -u +'%Y-%m-%d')"
-            # push with PAT so commit is attributed to your account
+            git commit -m "chore(weather): append weather ($(date -u +'%Y-%m-%dT%H:%MZ'))"
             REPO_URL="$(git remote get-url origin)"
-            # use token auth for push
             AUTH_URL=$(echo "$REPO_URL" | sed -E "s#https://(.*)@?github.com/#https://x-access-token:${GH_PAT}@github.com/#; t; s#https://#https://x-access-token:${GH_PAT}@#")
             git push "$AUTH_URL" HEAD:$(git rev-parse --abbrev-ref HEAD)
           else
