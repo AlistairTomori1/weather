@@ -161,3 +161,4 @@ timestamp_iso,city,country,temp_c,weather,humidity,wind_m_s,raw_json_url
 2025-11-07T06:18:57Z,Harare,ZW,17.68,"overcast clouds",87,3.88,openweathermap_current
 2025-11-07T10:14:01Z,Harare,ZW,20.46,"light rain",78,3.23,openweathermap_current
 2025-11-07T13:03:43Z,Harare,ZW,19.53,"light rain",72,2.39,openweathermap_current
+2025-11-07T17:37:56Z,Harare,ZW,17.12,"overcast clouds",80,3.37,openweathermap_current
