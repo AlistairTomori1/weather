@@ -17,7 +17,7 @@ concurrency:
 env:
   # Day boundary used for randomness and slot math
   LOCAL_TZ: America/Toronto
-  MIN_RUNS: "5"
+  MIN_RUNS: "0"
   MAX_RUNS: "22"
   SLOT_MINUTES: "30"   # change to 20 or 60 if you prefer
 
